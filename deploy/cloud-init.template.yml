@@ -1,0 +1,192 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - build-essential
+  - nginx
+  - openjdk-21-jdk
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - certbot
+  - python3-certbot-nginx
+
+write_files:
+  - path: /usr/local/bin/mount-disk.sh
+    content: |
+      #!/bin/bash
+      set -e
+
+      parted /dev/sda --script mklabel gpt mkpart xfspart xfs 0% 100%
+      mkfs.xfs /dev/sda1
+      partprobe /dev/sda1
+      mkdir /data
+      mount /dev/sda1 /data
+      UUID=$(blkid -s UUID -o value /dev/sda1)
+      echo "UUID=$UUID /data xfs defaults,nofail 1 2" >> /etc/fstab
+    permissions: '0755'
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "data-root": "/data/docker"
+      }
+  - path: /usr/local/bin/setup-nginx.sh
+    content: |
+      #!/bin/bash
+      set -e
+      # Increase nginx server_names_hash_bucket_size to 128
+      sed -i 's/# server_names_hash_bucket_size 64;/server_names_hash_bucket_size 128;/' /etc/nginx/nginx.conf
+
+      # Enable and start nginx
+      systemctl enable nginx
+      systemctl start nginx
+
+      # Test nginx configuration
+      nginx -t
+    permissions: '0755'
+  - path: /usr/local/bin/setup-letsencrypt.sh
+    content: |
+      #!/bin/bash
+      set -e
+
+      # Source the domain configuration
+      source /etc/cloud-init-domain.conf
+
+      echo "Setting up Let's Encrypt for domain: __DOMAIN__"
+
+      # Test nginx configuration
+      nginx -t
+
+      # Start nginx to handle ACME challenges
+      systemctl reload nginx
+
+      # Wait a moment for nginx to fully start
+      sleep 5
+
+      # Obtain SSL certificate from Let's Encrypt
+      certbot certonly \
+        --nginx \
+        -d "__DOMAIN__" \
+        --non-interactive \
+        --agree-tos \
+        --email "__DOMAIN_EMAIL__" \
+        --no-eff-email
+
+      # Enable automatic renewal
+      systemctl enable certbot.timer
+      systemctl start certbot.timer
+
+      # Enable the https site
+      ln -s /etc/nginx/sites-available/__DOMAIN__ /etc/nginx/sites-enabled/__DOMAIN__
+      systemctl reload nginx
+
+      echo "Let's Encrypt setup complete for __DOMAIN__"
+    permissions: '0755'
+  - path: /usr/local/bin/setup-docker.sh
+    content: |
+      #!/bin/bash
+      set -e
+
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Enable and start Docker
+      systemctl enable docker
+      systemctl start docker
+    permissions: '0755'
+  - path: /usr/local/bin/setup-sgx.sh
+    content: |
+      curl -fsSL https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key | tee /etc/apt/keyrings/intel-sgx-keyring.asc > /dev/null
+      echo "deb [signed-by=/etc/apt/keyrings/intel-sgx-keyring.asc] https://download.01.org/intel-sgx/sgx_repo/ubuntu jammy main" | tee /etc/apt/sources.list.d/intel-sgx.list
+      apt-get update
+      apt-get install -y libsgx-aesm-epid-plugin libsgx-aesm-launch-plugin libsgx-aesm-quote-ex-plugin libsgx-dcap-default-qpl libsgx-dcap-ql sgx-aesm-service
+      systemctl enable aesmd
+      systemctl start aesmd
+    permissions: '0755'
+  - path: /etc/nginx/sites-available/default
+    content: |
+      # HTTP server - handles ACME challenges and redirects to HTTPS
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+          server_name _;
+
+          # Allow Let's Encrypt ACME challenges
+          location /.well-known/acme-challenge/ {
+              root /var/www/html;
+          }
+
+          # Redirect all other HTTP traffic to HTTPS
+          location / {
+              return 301 https://$host$request_uri;
+          }
+      }
+    permissions: '0644'
+  - path: /etc/nginx/sites-available/__DOMAIN__
+    content: |
+      # HTTPS server - proxies to localhost:8080
+      server {
+          listen 443 ssl;
+          listen [::]:443 ssl;
+          server_name __DOMAIN__;
+
+          # certbot certonly \
+          #   --nginx \
+          #   -d "__DOMAIN__" \
+          #   --non-interactive --agree-tos --email "__DOMAIN_EMAIL__" \
+          #   --no-eff-email
+
+          # SSL certificates will be configured by certbot
+          ssl_certificate /etc/letsencrypt/live/__DOMAIN__/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/__DOMAIN__/privkey.pem;
+          include /etc/letsencrypt/options-ssl-nginx.conf;
+          ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+          # Proxy configuration
+          location / {
+              proxy_pass http://localhost:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header X-Forwarded-Host $host;
+              proxy_set_header X-Forwarded-Port $server_port;
+
+              # WebSocket support (if needed)
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+
+              # Timeout settings
+              proxy_connect_timeout 60s;
+              proxy_send_timeout 60s;
+              proxy_read_timeout 60s;
+          }
+      }
+    permissions: '0644'
+
+runcmd:
+  # Setup disk
+  - /usr/local/bin/mount-disk.sh
+
+  # Install Docker
+  - /usr/local/bin/setup-docker.sh
+
+  # Setup Nginx
+  - /usr/local/bin/setup-nginx.sh
+
+  # Run Let's Encrypt setup script
+  # We can't do this until we setup DNS for the new IP
+  # - /usr/local/bin/setup-letsencrypt.sh
+
+  # Install SGX
+  - /usr/local/bin/setup-sgx.sh
+
+final_message: |
+  Cloud-init setup complete!
