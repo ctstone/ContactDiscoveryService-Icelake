@@ -7,12 +7,13 @@ WORKDIR /home/app
 COPY classes /home/app/classes
 COPY dependency/* /home/app/libs/
 COPY classes/sgx_default_qcnl_azure.conf /etc/sgx_default_qcnl.conf
+RUN mkdir -p /home/cds/.dcap-qcnl
 EXPOSE 8080
 
 # Required, along with libsgx-quote-ex, for out-of-proc attestation. See
 # https://docs.microsoft.com/en-us/azure/confidential-computing/confidential-nodes-aks-addon
 ENV SGX_AESM_ADDR=1
-
+ENV ENCLAVE_SIMULATED=false
 RUN groupadd --gid 10000 cds && useradd --uid 10000 --gid 10000 cds
 USER 10000
 
