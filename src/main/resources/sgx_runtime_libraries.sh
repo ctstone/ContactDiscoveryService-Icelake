@@ -40,4 +40,5 @@ apt-get -y install \
     libsgx-quote-ex=2.25.100.3-jammy1 \
     libsgx-urts=2.25.100.3-jammy1 \
     sgx-aesm-service=2.25.100.3-jammy1 \
+    az-dcap-client \
 ## apt-get install
