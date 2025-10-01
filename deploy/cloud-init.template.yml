@@ -53,9 +53,6 @@ write_files:
       #!/bin/bash
       set -e
 
-      # Source the domain configuration
-      source /etc/cloud-init-domain.conf
-
       echo "Setting up Let's Encrypt for domain: __DOMAIN__"
 
       # Test nginx configuration
@@ -171,6 +168,25 @@ write_files:
       }
     permissions: '0644'
 
+  - path: /etc/sgx_default_qcnl.conf
+    content: |
+      {
+        "pccs_url": "https://global.acccache.azure.net/sgx/certification/v4/",
+        "use_secure_cert": false,
+        "collateral_service": "https://api.trustedservices.intel.com/sgx/certification/v4/",
+        "pccs_api_version": "3.1",
+        "retry_times": 6,
+        "retry_delay": 5,
+        "local_pck_url": "http://169.254.169.254/metadata/THIM/sgx/certification/v4/",
+        "pck_cache_expire_hours": 48,
+        "custom_request_options": {
+          "get_cert": {
+            "headers": { "metadata": "true" },
+            "params": { "api-version": "2021-07-22-preview" }
+          }
+        }
+      }
+    permissions: '0644'
 runcmd:
   # Setup disk
   - /usr/local/bin/mount-disk.sh
